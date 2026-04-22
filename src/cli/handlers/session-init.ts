@@ -11,8 +11,9 @@ import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, OBSERVER_SESSIONS_PROJECT } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { realpathSync } from 'fs';
 
 async function fetchSemanticContext(
   prompt: string,
@@ -53,6 +54,20 @@ export const sessionInitHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
+    // Guard: Prevent recursive observation loop (#2100)
+    // Observer sessions run in OBSERVER_SESSIONS_DIR and should NOT spawn new observer sessions.
+    // Resolve symlinks to handle cases where cwd might be a symlink.
+    let normalizedCwd: string;
+    try {
+      normalizedCwd = realpathSync(cwd);
+    } catch {
+      normalizedCwd = cwd;
+    }
+    if (normalizedCwd === OBSERVER_SESSIONS_DIR) {
+      logger.debug('HOOK', 'Skipping session-init for observer session (recursive guard)', { cwd });
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
     // Check if project is excluded from tracking
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
     if (cwd && isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
@@ -66,6 +81,13 @@ export const sessionInitHandler: EventHandler = {
 
     const project = getProjectContext(cwd).primary;
     const platformSource = normalizePlatformSource(input.platform);
+
+    // Guard: Prevent recursive observation loop by project name (#2100)
+    // Even if cwd check fails, project name check provides a second layer of protection.
+    if (project === OBSERVER_SESSIONS_PROJECT) {
+      logger.debug('HOOK', 'Skipping session-init for observer-sessions project (recursive guard)', { project });
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
 
     logger.debug('HOOK', 'session-init: Calling /api/sessions/init', { contentSessionId: sessionId, project });
 
